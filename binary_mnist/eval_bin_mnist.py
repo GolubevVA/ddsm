@@ -377,15 +377,15 @@ if __name__ == '__main__':
 
             loglikx = (torch.log(perturbed_x) * (x == 1)).sum(-1).mean()
 
-            torch.set_default_dtype(torch.float64)
+            torch.set_default_dtype(torch.float32)
 
             with torch.no_grad():
-                qlog = jacobi_diffusion_density(v.double(), perturbed_v.double(), min_time, alpha.to(device),
+                qlog = jacobi_diffusion_density(v.float(), perturbed_v.float(), min_time, alpha.to(device),
                                                 beta.to(device), order=1000).log()
             for i, (a, b) in enumerate(zip(alpha.to(device), beta.to(device))):
                 B = Beta(a, b)
                 nanmask = torch.isnan(qlog[..., i])
-                qlog[..., i][nanmask] = B.log_prob(perturbed_v[..., i][nanmask].double())
+                qlog[..., i][nanmask] = B.log_prob(perturbed_v[..., i][nanmask].float())
             qlog = (qlog.sum(-1) + sb.log_abs_det_jacobian(perturbed_v)).mean().float()
             torch.set_default_dtype(torch.float32)
 

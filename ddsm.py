@@ -17,6 +17,8 @@ from scipy import integrate
 import tqdm
 from numbers import Real
 
+from utils import get_best_device
+
 
 def beta_logp(alpha, beta, x):
     if isinstance(alpha, Real) and isinstance(beta, Real):
@@ -66,7 +68,7 @@ def jacobi_diffusion_density(x0, xt, t, a, b, order=100, speed_balanced=True):
     """
     Compute Jacobi diffusion transition density function.
     """
-    n = torch.arange(order, device=x0.device).double().expand(*x0.shape, order)
+    n = torch.arange(order, device=x0.device).float().expand(*x0.shape, order)
     if speed_balanced:
         s = 2 / (a + b)
     else:
@@ -91,11 +93,13 @@ def jacobi_diffusion_density(x0, xt, t, a, b, order=100, speed_balanced=True):
 
 
 def Jacobi_Euler_Maruyama_sampler(
-        x0, a, b, t, num_steps, speed_balanced=True, device="cuda", eps=1e-5
+        x0, a, b, t, num_steps, speed_balanced=True, device=None, eps=1e-5
 ):
     """
     Generate Jacobi diffusion samples with the Euler-Maruyama solver.
     """
+    if device is None:
+        device = get_best_device()
     a = a.to(device)
     b = b.to(device)
     x0 = x0.to(device)
@@ -125,10 +129,12 @@ def Jacobi_Euler_Maruyama_sampler(
 
 def noise_factory(N, n_time_steps, a, b, total_time=4, order=100,
                   time_steps=1000, speed_balanced=True, logspace=False,
-                  mode="independent", device="cuda"):
+                  mode="independent", device=None):
     """
     Generate Jacobi diffusion samples and compute score of transition density function.
     """
+    if device is None:
+        device = get_best_device()
     assert a.size() == b.size()
     noise_factory_one = torch.ones(N, n_time_steps, a.size(-1))
     noise_factory_zero = torch.zeros(N, n_time_steps, a.size(-1))
@@ -170,7 +176,7 @@ def noise_factory(N, n_time_steps, a, b, total_time=4, order=100,
     noise_factory_one_loggrad = torch.zeros(N, n_time_steps, a.size(-1))
     noise_factory_zero_loggrad = torch.zeros(N, n_time_steps, a.size(-1))
 
-    for i, t in enumerate(timepoints):
+    for i, t in tqdm.tqdm(enumerate(timepoints), total=n_time_steps):
         xt = noise_factory_one[:, i, :].detach().clone()
 
         xt.requires_grad = True
@@ -279,8 +285,8 @@ def simplex_diffusion_density(x0, xt, t, a, b, speed_balanced=True, order=100):
 
 
 def gx_to_gv(gx, x, create_graph=False, compute_gradlogdet=True):
-    gx = gx.double()
-    x = x.double()
+    gx = gx.float()
+    x = x.float()
     sb = UnitStickBreakingTransform()
     v = sb._inverse(x, prevent_nan=True).detach()
     v.requires_grad = True
@@ -295,8 +301,8 @@ def gx_to_gv(gx, x, create_graph=False, compute_gradlogdet=True):
 
 
 def gv_to_gx(gv, v, create_graph=False, compute_gradlogdet=True):
-    gv = gv.double()
-    v = v.double()
+    gv = gv.float()
+    v = v.float()
     sb = UnitStickBreakingTransform()
     x = sb(v).detach()
     x.requires_grad = True
@@ -315,12 +321,15 @@ def gv_to_gx(gv, v, create_graph=False, compute_gradlogdet=True):
 def diffusion_factory(
         x, time_ind, noise_factory_one, noise_factory_zero,
         noise_factory_one_loggrad, noise_factory_zero_loggrad,
-        alpha=None, beta=None, device="cuda", return_v=False, eps=1e-5, ):
+        alpha=None, beta=None, device=None, return_v=False, eps=1e-5, ):
     """
     Generate multivariate Jacobi diffusion samples and scores
     by sampling from noise factory for k-1 Jacobi diffusion processes.
     """
-    time_ind = time_ind[(...,) + (None,) * (x.ndim - 2)].expand(x.shape[:-1])
+    if device is None:
+        device = get_best_device()
+    nf_device = noise_factory_one.device
+    time_ind = time_ind[(...,) + (None,) * (x.ndim - 2)].expand(x.shape[:-1]).to(nf_device)
     K = x.shape[-1]
     if alpha is None:
         alpha = torch.ones(K - 1)
@@ -447,7 +456,7 @@ def Euler_Maruyama_sampler(
         time_dilation_start_time=None,
         batch_size=64,
         num_steps=100,
-        device="cuda",
+        device=None,
         random_order=False,
         speed_balanced=True,
         speed_factor=None,
@@ -499,6 +508,8 @@ def Euler_Maruyama_sampler(
     Samples : torch.Tensor
         Samples in x space.
     """
+    if device is None:
+        device = get_best_device()
     sb = UnitStickBreakingTransform()
     if alpha is None:
         alpha = torch.ones(sample_shape[-1] - 1, dtype=torch.float, device=device)
@@ -516,7 +527,7 @@ def Euler_Maruyama_sampler(
         s = torch.ones(sample_shape[-1] - 1).to(device)
 
     if init is None:
-        init_v = Beta(alpha, beta).sample((batch_size,) + sample_shape[:-1]).to(device)
+        init_v = Beta(alpha.cpu(), beta.cpu()).sample((batch_size,) + sample_shape[:-1]).to(device)
     else:
         init_v = sb._inverse(init).to(device)
 
@@ -643,7 +654,9 @@ def Euler_Maruyama_sampler(
 #############################################
 ########## Likelihood estimations ###########
 #############################################
-def prior_likelihood(v, alpha, beta, device='cuda'):
+def prior_likelihood(v, alpha, beta, device=None):
+    if device is None:
+        device = get_best_device()
     alpha = alpha.to(device)
     beta = beta.to(device)
     v = v.to(device)
@@ -655,7 +668,7 @@ def ode_likelihood(v,
                    max_time=4,
                    min_time=1e-2,
                    time_dilation=1,
-                   device='cuda',
+                   device=None,
                    eps=1e-6,
                    alpha=None,
                    beta=None,
@@ -663,6 +676,8 @@ def ode_likelihood(v,
                    concat_input=None,
                    verbose=False):
     # Draw the random Gaussian sample for Skilling-Hutchinson's estimator.
+    if device is None:
+        device = get_best_device()
     shape = v.shape
     epsilon = torch.randn(shape).to(device)
 
@@ -708,8 +723,8 @@ def ode_likelihood(v,
                 (None,) * (sample.ndim - 1)] * sample) - 0.5 * (1 - 2 * sample) - 0.5 * (g ** 2) * (score_v))
             score_e = torch.sum(f_tilde * epsilon)
             grad_score_e = grad(score_e, sample)[0]
-        div = torch.sum(grad_score_e * epsilon, dim=tuple(range(1, grad_score_e.ndim))).cpu().numpy().astype(np.float64)
-        return div, f_tilde.cpu().detach().numpy().reshape((-1,)).astype(np.float64)
+        div = torch.sum(grad_score_e * epsilon, dim=tuple(range(1, grad_score_e.ndim))).cpu().numpy().astype(np.float32)
+        return div, f_tilde.cpu().detach().numpy().reshape((-1,)).astype(np.float32)
 
     def ode_func(t, ode_x):
         time_steps = np.ones((shape[0],)) * t

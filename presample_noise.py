@@ -5,6 +5,9 @@ import torch
 
 from ddsm import noise_factory
 
+import tqdm
+
+
 def parse_args():
     parser = argparse.ArgumentParser("Pre generate jacobi process values with specified number of "
                                      "categories and time points")
@@ -42,6 +45,8 @@ def parse_args():
     return parser.parse_args()
 
 
+from utils import get_best_device
+
 if __name__ == '__main__':
     args = parse_args()
 
@@ -60,9 +65,9 @@ if __name__ == '__main__':
         print("File is already exists.")
         exit(1)
 
-    torch.set_default_dtype(torch.float64)
+    torch.set_default_dtype(torch.float32)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = get_best_device()
 
     alpha = torch.ones(args.num_cat - 1).to(device)
     beta =  torch.arange(args.num_cat - 1, 0, -1).to(device)
