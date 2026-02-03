@@ -331,11 +331,11 @@ if __name__ == '__main__':
     seifeatures = pd.read_csv(config.seifeatures_file, sep='|', header=None)
 
     sei = nn.DataParallel(NonStrandSpecific(Sei(4096, 21907)))
-    sei.load_state_dict(torch.load(config.seimodel_file, map_location='cpu')['state_dict'])
+    sei.load_state_dict(torch.load(config.seimodel_file, map_location='cpu', weights_only=False)['state_dict'])
     sei.cuda()
 
     ### LOAD WEIGHTS
-    v_one, v_zero, v_one_loggrad, v_zero_loggrad, timepoints = torch.load(config.diffusion_weights_file)
+    v_one, v_zero, v_one_loggrad, v_zero_loggrad, timepoints = torch.load(config.diffusion_weights_file, weights_only=False)
     v_one = v_one.cpu()
     v_zero = v_zero.cpu()
     v_one_loggrad = v_one_loggrad.cpu()
