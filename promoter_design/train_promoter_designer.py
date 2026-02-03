@@ -9,6 +9,9 @@ import tabix
 import pyBigWig
 import pandas as pd
 from matplotlib import pyplot as plt
+import wandb
+import numpy as np
+import argparse
 
 """
 Please cite this if you used Selene in your research.
@@ -52,7 +55,7 @@ class ModelParameters:
     diffusion_weights_file = 'steps400.cat4.speed_balance.time4.0.samples100000.pth'
 
     device = 'cuda'
-    batch_size = 256
+    batch_size = 64
     num_workers = 4
 
     n_time_steps = 400
@@ -65,6 +68,10 @@ class ModelParameters:
     num_epochs = 200
 
     lr = 5e-4
+
+    # WandB config
+    wandb_project = 'promoter-designer'
+    wandb_run_name = None  # Auto-generated if None
 
 
 class GenomicSignalFeatures(Target):
@@ -286,7 +293,33 @@ class ScoreNet(nn.Module):
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description="Train promoter designer with wandb logging")
+    parser.add_argument("--wandb_entity", default=None, help="Weights & Biases entity")
+    parser.add_argument("--wandb_project", default=None, help="Weights & Biases project")
+    parser.add_argument("--wandb_run_name", default=None, help="Weights & Biases run name")
+    args = parser.parse_args()
+
     config = ModelParameters()
+    if args.wandb_project is not None:
+        config.wandb_project = args.wandb_project
+    if args.wandb_run_name is not None:
+        config.wandb_run_name = args.wandb_run_name
+    
+    # Initialize wandb
+    wandb.init(
+        project=config.wandb_project,
+        entity=args.wandb_entity,
+        name=config.wandb_run_name,
+        config={
+            'batch_size': config.batch_size,
+            'lr': config.lr,
+            'num_epochs': config.num_epochs,
+            'n_time_steps': config.n_time_steps,
+            'random_order': config.random_order,
+            'speed_balanced': config.speed_balanced,
+            'ncat': config.ncat,
+        }
+    )
 
     sb = UnitStickBreakingTransform()
     """
@@ -367,8 +400,14 @@ if __name__ == '__main__':
     time_dependent_weights = time_dependent_cums / time_dependent_counts
     time_dependent_weights = time_dependent_weights / time_dependent_weights.mean()
 
+    plt.figure(figsize=(10, 6))
     plt.plot(torch.sqrt(time_dependent_weights.cpu()))
+    plt.xlabel('Time Step')
+    plt.ylabel('Weight (sqrt)')
+    plt.title('Time-Dependent Weights')
     plt.savefig("timedependent_weight.png")
+    wandb.log({"time_dependent_weights": wandb.Image("timedependent_weight.png")})
+    plt.close()
 
     #### PREPARE Valid DATASET
     valid_set = TSSDatasetS(config, split='valid', n_tsses=40000, rand_offset=0)
@@ -414,6 +453,7 @@ if __name__ == '__main__':
         avg_loss = 0.
         num_items = 0
         stime = time.time()
+        batch_losses = []
 
         for xS in data_loader:
             x = xS[:, :, :4]
@@ -474,10 +514,19 @@ if __name__ == '__main__':
             optimizer.step()
             avg_loss += loss.item() * x.shape[0]
             num_items += x.shape[0]
+            batch_losses.append(loss.item())
 
         # Print the averaged training loss so far.
-        print(avg_loss / num_items)
-        tqdm_epoch.set_description('Average Loss: {:5f}'.format(avg_loss / num_items))
+        train_loss = avg_loss / num_items
+        print(train_loss)
+        tqdm_epoch.set_description('Average Loss: {:5f}'.format(train_loss))
+        
+        # Log training metrics
+        wandb.log({
+            'epoch': epoch,
+            'train/loss': train_loss,
+            'train/loss_std': np.std(batch_losses),
+        })
 
         if epoch % 5 == 0:
             score_model.eval()
@@ -514,11 +563,35 @@ if __name__ == '__main__':
 
             allsamples_predh3k4me3 = allsamples_pred[:, seifeatures[1].str.strip().values == 'H3K4me3'].mean(axis=-1)
             valid_loss = ((validseqs_predh3k4me3 - allsamples_predh3k4me3) ** 2).mean()
-            print(f"{epoch} valid sei loss {valid_loss} {time.time() - stime}", flush=True)
+            epoch_time = time.time() - stime
+            print(f"{epoch} valid sei loss {valid_loss} {epoch_time}", flush=True)
+            
+            # Calculate additional metrics
+            mae = np.abs(validseqs_predh3k4me3 - allsamples_predh3k4me3).mean()
+            correlation = np.corrcoef(validseqs_predh3k4me3, allsamples_predh3k4me3)[0, 1]
+            
+            # Log validation metrics
+            wandb.log({
+                'epoch': epoch,
+                'val/mse_loss': valid_loss,
+                'val/mae': mae,
+                'val/correlation': correlation,
+                'epoch_time': epoch_time,
+            })
 
             if valid_loss < bestsei_validloss:
                 print('Best valid SEI loss!')
                 bestsei_validloss = valid_loss
                 torch.save(score_model.state_dict(), 'sdedna_promoter_revision.sei.bestvalid.pth')
+                wandb.log({
+                    'best_val_mse': valid_loss,
+                    'best_val_mae': mae,
+                    'best_val_correlation': correlation,
+                })
+                # Save model to wandb
+                wandb.save('sdedna_promoter_revision.sei.bestvalid.pth')
 
             score_model.train()
+    
+    # Finish wandb run
+    wandb.finish()
