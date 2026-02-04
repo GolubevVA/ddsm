@@ -55,7 +55,8 @@ class ModelParameters:
     diffusion_weights_file = 'steps400.cat4.speed_balance.time4.0.samples100000.pth'
 
     device = 'cuda'
-    batch_size = 64
+    batch_size = 32  # Reduced from 64
+    accumulation_steps = 2  # Effective batch_size = 32 * 2 = 64
     num_workers = 0
 
     n_time_steps = 400
@@ -312,6 +313,8 @@ if __name__ == '__main__':
         name=config.wandb_run_name,
         config={
             'batch_size': config.batch_size,
+            'accumulation_steps': config.accumulation_steps,
+            'effective_batch_size': config.batch_size * config.accumulation_steps,
             'lr': config.lr,
             'num_epochs': config.num_epochs,
             'n_time_steps': config.n_time_steps,
@@ -468,8 +471,9 @@ if __name__ == '__main__':
         num_items = 0
         stime = time.time()
         batch_losses = []
+        optimizer.zero_grad()  # Zero gradients at the start of epoch
 
-        for xS in data_loader:
+        for batch_idx, xS in enumerate(data_loader):
             x = xS[:, :, :4]
             s = xS[:, :, 4:5]
 
@@ -523,12 +527,18 @@ if __name__ == '__main__':
                                 gx_to_gv(score, perturbed_x, create_graph=True) - gx_to_gv(perturbed_x_grad,
                                                                                            perturbed_x)) ** 2, dim=(1)))
 
-            optimizer.zero_grad()
+            # Normalize loss by accumulation steps for gradient averaging
+            loss = loss / config.accumulation_steps
             loss.backward()
-            optimizer.step()
-            avg_loss += loss.item() * x.shape[0]
+            
+            # Only update weights every accumulation_steps batches
+            if (batch_idx + 1) % config.accumulation_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad()
+            
+            avg_loss += loss.item() * x.shape[0] * config.accumulation_steps
             num_items += x.shape[0]
-            batch_losses.append(loss.item())
+            batch_losses.append(loss.item() * config.accumulation_steps)
 
         # Print the averaged training loss so far.
         train_loss = avg_loss / num_items
@@ -544,36 +554,52 @@ if __name__ == '__main__':
 
         if epoch % 5 == 0:
             score_model.eval()
+            
+            # Clear CUDA cache before validation
+            torch.cuda.empty_cache()
 
             # generate sequence samples
             torch.set_default_dtype(torch.float32)
             allsamples = []
-            for t in valid_datasets:
-                allsamples.append(sampler(score_model,
-                                          (1024, 4),
-                                          batch_size=t.shape[0],
-                                          max_time=4,
-                                          min_time=4 / 400,
-                                          time_dilation=1,
-                                          num_steps=100,
-                                          eps=1e-5,
-                                          speed_balanced=config.speed_balanced,
-                                          device=config.device,
-                                          concat_input=t[:, :, 4:5].cuda()
-                                          ).detach().cpu().numpy()
-                                  )
+            with torch.no_grad():  # Disable gradient computation for validation
+                for t in valid_datasets:
+                    # Reduce batch_size to avoid OOM
+                    sample_batch_size = min(32, t.shape[0])
+                    allsamples.append(sampler(score_model,
+                                              (1024, 4),
+                                              batch_size=sample_batch_size,
+                                              max_time=4,
+                                              min_time=4 / 400,
+                                              time_dilation=1,
+                                              num_steps=100,
+                                              eps=1e-5,
+                                              speed_balanced=config.speed_balanced,
+                                              device=config.device,
+                                              concat_input=t[:sample_batch_size, :, 4:5].cuda()
+                                              ).detach().cpu().numpy()
+                                      )
+                    # Clear CUDA cache after each sample generation
+                    torch.cuda.empty_cache()
 
             allsamples = np.concatenate(allsamples, axis=0)
-            allsamples_pred = np.zeros((2915, 21907))
-            for i in range(int(allsamples.shape[0] / 128)):
-                seq = 1.0 * (allsamples[i * 128:(i + 1) * 128] > 0.5)
-                allsamples_pred[i * 128:(i + 1) * 128] = sei(
-                    torch.cat([torch.ones((seq.shape[0], 4, 1536)) * 0.25, torch.FloatTensor(seq).transpose(1, 2),
-                               torch.ones((seq.shape[0], 4, 1536)) * 0.25], 2).cuda()).cpu().detach().numpy()
-            seq = allsamples[-128:]
-            allsamples_pred[-128:] = sei(
-                torch.cat([torch.ones((seq.shape[0], 4, 1536)) * 0.25, torch.FloatTensor(seq).transpose(1, 2),
-                           torch.ones((seq.shape[0], 4, 1536)) * 0.25], 2).cuda()).cpu().detach().numpy()
+            allsamples_pred = np.zeros((allsamples.shape[0], 21907))
+            
+            with torch.no_grad():  # Disable gradient computation for SEI predictions
+                for i in range(int(allsamples.shape[0] / 128)):
+                    seq = 1.0 * (allsamples[i * 128:(i + 1) * 128] > 0.5)
+                    allsamples_pred[i * 128:(i + 1) * 128] = sei(
+                        torch.cat([torch.ones((seq.shape[0], 4, 1536)) * 0.25, torch.FloatTensor(seq).transpose(1, 2),
+                                   torch.ones((seq.shape[0], 4, 1536)) * 0.25], 2).cuda()).cpu().detach().numpy()
+                    torch.cuda.empty_cache()  # Clear cache after each batch
+                
+                # Handle remaining samples
+                remaining = allsamples.shape[0] % 128
+                if remaining > 0:
+                    seq = allsamples[-remaining:]
+                    allsamples_pred[-remaining:] = sei(
+                        torch.cat([torch.ones((seq.shape[0], 4, 1536)) * 0.25, torch.FloatTensor(seq).transpose(1, 2),
+                                   torch.ones((seq.shape[0], 4, 1536)) * 0.25], 2).cuda()).cpu().detach().numpy()
+                    torch.cuda.empty_cache()
 
             allsamples_predh3k4me3 = allsamples_pred[:, seifeatures[1].str.strip().values == 'H3K4me3'].mean(axis=-1)
             valid_loss = ((validseqs_predh3k4me3 - allsamples_predh3k4me3) ** 2).mean()
