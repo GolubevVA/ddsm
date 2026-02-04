@@ -436,16 +436,19 @@ if __name__ == '__main__':
     validseqs = np.concatenate(validseqs, axis=0)
 
     with torch.no_grad():
-        validseqs_pred = np.zeros((2915, 21907))
+        validseqs_pred = np.zeros((validseqs.shape[0], 21907))
         for i in range(int(validseqs.shape[0] / 128)):
             validseq = validseqs[i * 128:(i + 1) * 128]
             validseqs_pred[i * 128:(i + 1) * 128] = sei(
                 torch.cat([torch.ones((validseq.shape[0], 4, 1536)) * 0.25, torch.FloatTensor(validseq).transpose(1, 2),
                            torch.ones((validseq.shape[0], 4, 1536)) * 0.25], 2).cuda()).cpu().detach().numpy()
-        validseq = validseqs[-128:]
-        validseqs_pred[-128:] = sei(
-            torch.cat([torch.ones((validseq.shape[0], 4, 1536)) * 0.25, torch.FloatTensor(validseq).transpose(1, 2),
-                       torch.ones((validseq.shape[0], 4, 1536)) * 0.25], 2).cuda()).cpu().detach().numpy()
+        # Handle remaining samples
+        remaining = validseqs.shape[0] % 128
+        if remaining > 0:
+            validseq = validseqs[-remaining:]
+            validseqs_pred[-remaining:] = sei(
+                torch.cat([torch.ones((validseq.shape[0], 4, 1536)) * 0.25, torch.FloatTensor(validseq).transpose(1, 2),
+                           torch.ones((validseq.shape[0], 4, 1536)) * 0.25], 2).cuda()).cpu().detach().numpy()
     validseqs_predh3k4me3 = validseqs_pred[:, seifeatures[1].str.strip().values == 'H3K4me3'].mean(axis=1)
 
     #### TRAINING CODE
@@ -563,22 +566,27 @@ if __name__ == '__main__':
             allsamples = []
             with torch.no_grad():  # Disable gradient computation for validation
                 for t in valid_datasets:
-                    # Reduce batch_size to avoid OOM
-                    sample_batch_size = min(32, t.shape[0])
-                    allsamples.append(sampler(score_model,
-                                              (1024, 4),
-                                              batch_size=sample_batch_size,
-                                              max_time=4,
-                                              min_time=4 / 400,
-                                              time_dilation=1,
-                                              num_steps=100,
-                                              eps=1e-5,
-                                              speed_balanced=config.speed_balanced,
-                                              device=config.device,
-                                              concat_input=t[:sample_batch_size, :, 4:5].cuda()
-                                              ).detach().cpu().numpy()
-                                      )
-                    # Clear CUDA cache after each sample generation
+                    # Process each validation batch in smaller sub-batches to avoid OOM
+                    batch_samples = []
+                    sub_batch_size = 16  # Small batch for generation
+                    for start_idx in range(0, t.shape[0], sub_batch_size):
+                        end_idx = min(start_idx + sub_batch_size, t.shape[0])
+                        batch_samples.append(sampler(score_model,
+                                                  (1024, 4),
+                                                  batch_size=end_idx - start_idx,
+                                                  max_time=4,
+                                                  min_time=4 / 400,
+                                                  time_dilation=1,
+                                                  num_steps=100,
+                                                  eps=1e-5,
+                                                  speed_balanced=config.speed_balanced,
+                                                  device=config.device,
+                                                  concat_input=t[start_idx:end_idx, :, 4:5].cuda()
+                                                  ).detach().cpu().numpy()
+                                          )
+                        torch.cuda.empty_cache()
+                    allsamples.append(np.concatenate(batch_samples, axis=0))
+                    # Clear CUDA cache after each validation batch
                     torch.cuda.empty_cache()
 
             allsamples = np.concatenate(allsamples, axis=0)
