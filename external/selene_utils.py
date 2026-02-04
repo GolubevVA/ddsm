@@ -89,9 +89,12 @@ class MemmapGenome(Genome):
         super().__init__(
             input_path, blacklist_regions=blacklist_regions, bases_order=bases_order,
         )
-        self.input_path = input_path  # Store input_path for later use
+        # Store all attributes needed for unpickling
+        self.input_path = input_path
+        self.blacklist_regions = blacklist_regions
+        self.bases_order = bases_order
         self.memmapfile = memmapfile
-        self.initialized = False  # Add this line to fix pickling issue
+        self.initialized = False
         if init_unpicklable:
             self._unpicklable_init()
 
