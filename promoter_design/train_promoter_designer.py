@@ -55,8 +55,8 @@ class ModelParameters:
     diffusion_weights_file = 'steps400.cat4.speed_balance.time4.0.samples100000.pth'
 
     device = 'cuda'
-    batch_size = 32  # Reduced from 64
-    accumulation_steps = 2  # Effective batch_size = 32 * 2 = 64
+    batch_size = 32  # Reduced from original 256
+    accumulation_steps = 8  # Effective batch_size = 32 * 8 = 256
     num_workers = 0
 
     n_time_steps = 400
@@ -305,7 +305,7 @@ if __name__ == '__main__':
         config.wandb_project = args.wandb_project
     if args.wandb_run_name is not None:
         config.wandb_run_name = args.wandb_run_name
-    
+
     # Initialize wandb
     wandb.init(
         project=config.wandb_project,
@@ -341,7 +341,9 @@ if __name__ == '__main__':
 
     ### LOAD WEIGHTS
     print("Loading diffusion weights...", flush=True)
-    v_one, v_zero, v_one_loggrad, v_zero_loggrad, timepoints = torch.load(config.diffusion_weights_file, weights_only=False)
+    v_one, v_zero, v_one_loggrad, v_zero_loggrad, timepoints = torch.load(
+        config.diffusion_weights_file, weights_only=False
+    )
     print("Diffusion weights loaded.", flush=True)
     v_one = v_one.cpu()
     v_zero = v_zero.cpu()
@@ -379,7 +381,9 @@ if __name__ == '__main__':
             perturbed_x = perturbed_x[..., np.argsort(order)]
             perturbed_x_grad = perturbed_x_grad[..., np.argsort(order)]
         else:
-            perturbed_x, perturbed_x_grad = diffusion_fast_flatdirichlet(x, random_t, v_one, v_one_loggrad)
+            perturbed_x, perturbed_x_grad = diffusion_factory(
+                x, random_t, v_one, v_zero, v_one_loggrad, v_zero_loggrad, alpha, beta
+            )
         perturbed_x = perturbed_x.to(config.device)
         perturbed_x_grad = perturbed_x_grad.to(config.device)
         random_t = random_t.to(config.device)
@@ -407,11 +411,6 @@ if __name__ == '__main__':
             time_dependent_cums[random_t] += (perturbed_v * (1 - perturbed_v) * s[(None,) * (x.ndim - 1)] * (
                 gx_to_gv(perturbed_x_grad, perturbed_x)) ** 2).view(x.shape[0], -1).mean(dim=1).detach()
 
-    time_dependent_counts = torch.where(
-        time_dependent_counts == 0,
-        torch.ones_like(time_dependent_counts),
-        time_dependent_counts,
-    )
     time_dependent_weights = time_dependent_cums / time_dependent_counts
     time_dependent_weights = time_dependent_weights / time_dependent_weights.mean()
     print("Time-dependent weights computed.", flush=True)
@@ -439,19 +438,16 @@ if __name__ == '__main__':
     validseqs = np.concatenate(validseqs, axis=0)
 
     with torch.no_grad():
-        validseqs_pred = np.zeros((validseqs.shape[0], 21907))
+        validseqs_pred = np.zeros((2915, 21907))
         for i in range(int(validseqs.shape[0] / 128)):
             validseq = validseqs[i * 128:(i + 1) * 128]
             validseqs_pred[i * 128:(i + 1) * 128] = sei(
                 torch.cat([torch.ones((validseq.shape[0], 4, 1536)) * 0.25, torch.FloatTensor(validseq).transpose(1, 2),
                            torch.ones((validseq.shape[0], 4, 1536)) * 0.25], 2).cuda()).cpu().detach().numpy()
-        # Handle remaining samples
-        remaining = validseqs.shape[0] % 128
-        if remaining > 0:
-            validseq = validseqs[-remaining:]
-            validseqs_pred[-remaining:] = sei(
-                torch.cat([torch.ones((validseq.shape[0], 4, 1536)) * 0.25, torch.FloatTensor(validseq).transpose(1, 2),
-                           torch.ones((validseq.shape[0], 4, 1536)) * 0.25], 2).cuda()).cpu().detach().numpy()
+        validseq = validseqs[-128:]
+        validseqs_pred[-128:] = sei(
+            torch.cat([torch.ones((validseq.shape[0], 4, 1536)) * 0.25, torch.FloatTensor(validseq).transpose(1, 2),
+                       torch.ones((validseq.shape[0], 4, 1536)) * 0.25], 2).cuda()).cpu().detach().numpy()
     validseqs_predh3k4me3 = validseqs_pred[:, seifeatures[1].str.strip().values == 'H3K4me3'].mean(axis=1)
 
     #### TRAINING CODE
@@ -537,22 +533,24 @@ if __name__ == '__main__':
                                 gx_to_gv(score, perturbed_x, create_graph=True) - gx_to_gv(perturbed_x_grad,
                                                                                            perturbed_x)) ** 2, dim=(1)))
 
-            # Normalize loss by accumulation steps for gradient averaging
+            loss_raw = loss
             loss = loss / config.accumulation_steps
             loss.backward()
-            
-            # Only update weights every accumulation_steps batches
+
             if (batch_idx + 1) % config.accumulation_steps == 0:
                 optimizer.step()
                 optimizer.zero_grad()
-            
-            avg_loss += loss.item() * x.shape[0] * config.accumulation_steps
+
+            avg_loss += loss_raw.item() * x.shape[0]
             num_items += x.shape[0]
-            batch_losses.append(loss.item() * config.accumulation_steps)
+            batch_losses.append(loss_raw.item())
+
+        if (batch_idx + 1) % config.accumulation_steps != 0:
+            optimizer.step()
+            optimizer.zero_grad()
 
         # Print the averaged training loss so far.
         train_loss = avg_loss / num_items
-        print(train_loss)
         print(f"epoch {epoch + 1}/{config.num_epochs} train/loss {train_loss:.6f}", flush=True)
         
         # Log training metrics
@@ -564,62 +562,42 @@ if __name__ == '__main__':
 
         if epoch % 5 == 0:
             score_model.eval()
-            
-            # Clear CUDA cache before validation
-            torch.cuda.empty_cache()
 
             # generate sequence samples
             torch.set_default_dtype(torch.float32)
             allsamples = []
-            with torch.no_grad():  # Disable gradient computation for validation
+            with torch.no_grad():
                 val_pbar = tqdm.tqdm(
                     valid_datasets,
                     desc=f"val {epoch + 1}/{config.num_epochs}",
                     leave=False,
                 )
                 for t in val_pbar:
-                    # Process each validation batch in smaller sub-batches to avoid OOM
-                    batch_samples = []
-                    sub_batch_size = 16  # Small batch for generation
-                    for start_idx in range(0, t.shape[0], sub_batch_size):
-                        end_idx = min(start_idx + sub_batch_size, t.shape[0])
-                        batch_samples.append(sampler(score_model,
-                                                  (1024, 4),
-                                                  batch_size=end_idx - start_idx,
-                                                  max_time=4,
-                                                  min_time=4 / 400,
-                                                  time_dilation=1,
-                                                  num_steps=100,
-                                                  eps=1e-5,
-                                                  speed_balanced=config.speed_balanced,
-                                                  device=config.device,
-                                                  concat_input=t[start_idx:end_idx, :, 4:5].cuda()
-                                                  ).detach().cpu().numpy()
-                                          )
-                        torch.cuda.empty_cache()
-                    allsamples.append(np.concatenate(batch_samples, axis=0))
-                    # Clear CUDA cache after each validation batch
-                    torch.cuda.empty_cache()
+                    allsamples.append(sampler(score_model,
+                                              (1024, 4),
+                                              batch_size=t.shape[0],
+                                              max_time=4,
+                                              min_time=4 / 400,
+                                              time_dilation=1,
+                                              num_steps=100,
+                                              eps=1e-5,
+                                              speed_balanced=config.speed_balanced,
+                                              device=config.device,
+                                              concat_input=t[:, :, 4:5].cuda()
+                                              ).detach().cpu().numpy()
+                                      )
 
             allsamples = np.concatenate(allsamples, axis=0)
-            allsamples_pred = np.zeros((allsamples.shape[0], 21907))
-            
-            with torch.no_grad():  # Disable gradient computation for SEI predictions
-                for i in range(int(allsamples.shape[0] / 128)):
-                    seq = 1.0 * (allsamples[i * 128:(i + 1) * 128] > 0.5)
-                    allsamples_pred[i * 128:(i + 1) * 128] = sei(
-                        torch.cat([torch.ones((seq.shape[0], 4, 1536)) * 0.25, torch.FloatTensor(seq).transpose(1, 2),
-                                   torch.ones((seq.shape[0], 4, 1536)) * 0.25], 2).cuda()).cpu().detach().numpy()
-                    torch.cuda.empty_cache()  # Clear cache after each batch
-                
-                # Handle remaining samples
-                remaining = allsamples.shape[0] % 128
-                if remaining > 0:
-                    seq = allsamples[-remaining:]
-                    allsamples_pred[-remaining:] = sei(
-                        torch.cat([torch.ones((seq.shape[0], 4, 1536)) * 0.25, torch.FloatTensor(seq).transpose(1, 2),
-                                   torch.ones((seq.shape[0], 4, 1536)) * 0.25], 2).cuda()).cpu().detach().numpy()
-                    torch.cuda.empty_cache()
+            allsamples_pred = np.zeros((2915, 21907))
+            for i in range(int(allsamples.shape[0] / 128)):
+                seq = 1.0 * (allsamples[i * 128:(i + 1) * 128] > 0.5)
+                allsamples_pred[i * 128:(i + 1) * 128] = sei(
+                    torch.cat([torch.ones((seq.shape[0], 4, 1536)) * 0.25, torch.FloatTensor(seq).transpose(1, 2),
+                               torch.ones((seq.shape[0], 4, 1536)) * 0.25], 2).cuda()).cpu().detach().numpy()
+            seq = allsamples[-128:]
+            allsamples_pred[-128:] = sei(
+                torch.cat([torch.ones((seq.shape[0], 4, 1536)) * 0.25, torch.FloatTensor(seq).transpose(1, 2),
+                           torch.ones((seq.shape[0], 4, 1536)) * 0.25], 2).cuda()).cpu().detach().numpy()
 
             allsamples_predh3k4me3 = allsamples_pred[:, seifeatures[1].str.strip().values == 'H3K4me3'].mean(axis=-1)
             valid_loss = ((validseqs_predh3k4me3 - allsamples_predh3k4me3) ** 2).mean()
@@ -628,17 +606,11 @@ if __name__ == '__main__':
                 f"epoch {epoch + 1}/{config.num_epochs} val/mse_loss {valid_loss:.6f} time {epoch_time:.2f}s",
                 flush=True,
             )
-            
-            # Calculate additional metrics
-            mae = np.abs(validseqs_predh3k4me3 - allsamples_predh3k4me3).mean()
-            correlation = np.corrcoef(validseqs_predh3k4me3, allsamples_predh3k4me3)[0, 1]
-            
+
             # Log validation metrics
             wandb.log({
                 'epoch': epoch,
                 'val/mse_loss': valid_loss,
-                'val/mae': mae,
-                'val/correlation': correlation,
                 'epoch_time': epoch_time,
             })
 
@@ -648,8 +620,6 @@ if __name__ == '__main__':
                 torch.save(score_model.state_dict(), 'sdedna_promoter_revision.sei.bestvalid.pth')
                 wandb.log({
                     'best_val_mse': valid_loss,
-                    'best_val_mae': mae,
-                    'best_val_correlation': correlation,
                 })
                 # Save model to wandb
                 wandb.save('sdedna_promoter_revision.sei.bestvalid.pth')
