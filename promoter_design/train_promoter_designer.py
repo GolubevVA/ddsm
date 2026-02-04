@@ -379,9 +379,7 @@ if __name__ == '__main__':
             perturbed_x = perturbed_x[..., np.argsort(order)]
             perturbed_x_grad = perturbed_x_grad[..., np.argsort(order)]
         else:
-            # perturbed_x, perturbed_x_grad = diffusion_fast_flatdirichlet(x, random_t, v_one, v_one_loggrad)
-            perturbed_x, perturbed_x_grad = diffusion_factory(x, random_t, v_one, v_zero, v_one_loggrad, v_zero_loggrad,
-                                                              alpha, beta)
+            perturbed_x, perturbed_x_grad = diffusion_fast_flatdirichlet(x, random_t, v_one, v_one_loggrad)
         perturbed_x = perturbed_x.to(config.device)
         perturbed_x_grad = perturbed_x_grad.to(config.device)
         random_t = random_t.to(config.device)
@@ -409,6 +407,11 @@ if __name__ == '__main__':
             time_dependent_cums[random_t] += (perturbed_v * (1 - perturbed_v) * s[(None,) * (x.ndim - 1)] * (
                 gx_to_gv(perturbed_x_grad, perturbed_x)) ** 2).view(x.shape[0], -1).mean(dim=1).detach()
 
+    time_dependent_counts = torch.where(
+        time_dependent_counts == 0,
+        torch.ones_like(time_dependent_counts),
+        time_dependent_counts,
+    )
     time_dependent_weights = time_dependent_cums / time_dependent_counts
     time_dependent_weights = time_dependent_weights / time_dependent_weights.mean()
     print("Time-dependent weights computed.", flush=True)
@@ -468,15 +471,19 @@ if __name__ == '__main__':
     torch.set_default_dtype(torch.float32)
     bestsei_validloss = float('Inf')
 
-    tqdm_epoch = tqdm.trange(config.num_epochs)
-    for epoch in tqdm_epoch:
+    for epoch in range(config.num_epochs):
         avg_loss = 0.
         num_items = 0
         stime = time.time()
         batch_losses = []
         optimizer.zero_grad()  # Zero gradients at the start of epoch
 
-        for batch_idx, xS in enumerate(data_loader):
+        batch_pbar = tqdm.tqdm(
+            data_loader,
+            desc=f"epoch {epoch + 1}/{config.num_epochs}",
+            leave=False,
+        )
+        for batch_idx, xS in enumerate(batch_pbar):
             x = xS[:, :, :4]
             s = xS[:, :, 4:5]
 
@@ -546,7 +553,7 @@ if __name__ == '__main__':
         # Print the averaged training loss so far.
         train_loss = avg_loss / num_items
         print(train_loss)
-        tqdm_epoch.set_description('Average Loss: {:5f}'.format(train_loss))
+        print(f"epoch {epoch + 1}/{config.num_epochs} train/loss {train_loss:.6f}", flush=True)
         
         # Log training metrics
         wandb.log({
@@ -565,7 +572,12 @@ if __name__ == '__main__':
             torch.set_default_dtype(torch.float32)
             allsamples = []
             with torch.no_grad():  # Disable gradient computation for validation
-                for t in valid_datasets:
+                val_pbar = tqdm.tqdm(
+                    valid_datasets,
+                    desc=f"val {epoch + 1}/{config.num_epochs}",
+                    leave=False,
+                )
+                for t in val_pbar:
                     # Process each validation batch in smaller sub-batches to avoid OOM
                     batch_samples = []
                     sub_batch_size = 16  # Small batch for generation
@@ -612,7 +624,10 @@ if __name__ == '__main__':
             allsamples_predh3k4me3 = allsamples_pred[:, seifeatures[1].str.strip().values == 'H3K4me3'].mean(axis=-1)
             valid_loss = ((validseqs_predh3k4me3 - allsamples_predh3k4me3) ** 2).mean()
             epoch_time = time.time() - stime
-            print(f"{epoch} valid sei loss {valid_loss} {epoch_time}", flush=True)
+            print(
+                f"epoch {epoch + 1}/{config.num_epochs} val/mse_loss {valid_loss:.6f} time {epoch_time:.2f}s",
+                flush=True,
+            )
             
             # Calculate additional metrics
             mae = np.abs(validseqs_predh3k4me3 - allsamples_predh3k4me3).mean()
