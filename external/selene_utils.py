@@ -90,6 +90,7 @@ class MemmapGenome(Genome):
             input_path, blacklist_regions=blacklist_regions, bases_order=bases_order,
         )
         self.memmapfile = memmapfile
+        self.initialized = False  # Add this line to fix pickling issue
         if init_unpicklable:
             self._unpicklable_init()
 
