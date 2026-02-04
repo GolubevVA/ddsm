@@ -328,14 +328,18 @@ if __name__ == '__main__':
     regulatory activity for deciphering human genetics. Nature genetics, 54(7), 940-949. 
     [https://doi.org/10.1038/s41588-022-01102-2](https://doi.org/10.1038/s41588-022-01102-2)  
     """
+    print("Loading SEI model...", flush=True)
     seifeatures = pd.read_csv(config.seifeatures_file, sep='|', header=None)
 
     sei = nn.DataParallel(NonStrandSpecific(Sei(4096, 21907)))
     sei.load_state_dict(torch.load(config.seimodel_file, map_location='cpu', weights_only=False)['state_dict'])
     sei.cuda()
+    print("SEI model loaded successfully.", flush=True)
 
     ### LOAD WEIGHTS
+    print("Loading diffusion weights...", flush=True)
     v_one, v_zero, v_one_loggrad, v_zero_loggrad, timepoints = torch.load(config.diffusion_weights_file, weights_only=False)
+    print("Diffusion weights loaded.", flush=True)
     v_one = v_one.cpu()
     v_zero = v_zero.cpu()
     v_one_loggrad = v_one_loggrad.cpu()
@@ -347,15 +351,20 @@ if __name__ == '__main__':
     ### TIME DEPENDENT WEIGHTS ###
     torch.set_default_dtype(torch.float32)
 
+    print("Creating training dataset...", flush=True)
     train_set = TSSDatasetS(config, n_tsses=40000, rand_offset=10)
     data_loader = DataLoader(train_set, batch_size=config.batch_size, shuffle=True, num_workers=config.num_workers)
+    print(f"Dataset created with {len(train_set)} samples.", flush=True)
 
+    print("Computing time-dependent weights (this may take several minutes)...", flush=True)
     time_dependent_cums = torch.zeros(config.n_time_steps).to(config.device)
     time_dependent_counts = torch.zeros(config.n_time_steps).to(config.device)
 
     avg_loss = 0.
     num_items = 0
     for i, x in enumerate(data_loader):
+        if i % 50 == 0:
+            print(f"Processing batch {i}/{len(data_loader)}...", flush=True)
         x = x[..., :4]
         random_t = torch.randint(0, config.n_time_steps, (x.shape[0],))
 
@@ -399,6 +408,7 @@ if __name__ == '__main__':
 
     time_dependent_weights = time_dependent_cums / time_dependent_counts
     time_dependent_weights = time_dependent_weights / time_dependent_weights.mean()
+    print("Time-dependent weights computed.", flush=True)
 
     plt.figure(figsize=(10, 6))
     plt.plot(torch.sqrt(time_dependent_weights.cpu()))
@@ -410,6 +420,7 @@ if __name__ == '__main__':
     plt.close()
 
     #### PREPARE Valid DATASET
+    print("Preparing validation dataset...", flush=True)
     valid_set = TSSDatasetS(config, split='valid', n_tsses=40000, rand_offset=0)
     valid_data_loader = DataLoader(valid_set, batch_size=config.batch_size, shuffle=False, num_workers=0)
     valid_datasets = []
@@ -435,12 +446,15 @@ if __name__ == '__main__':
     validseqs_predh3k4me3 = validseqs_pred[:, seifeatures[1].str.strip().values == 'H3K4me3'].mean(axis=1)
 
     #### TRAINING CODE
+    print("Initializing score model...", flush=True)
     score_model = nn.DataParallel(ScoreNet(time_dependent_weights=torch.sqrt(time_dependent_weights)))
     score_model = score_model.to(config.device)
     score_model.train()
 
+    print("Creating training dataset for main training loop...", flush=True)
     train_set = TSSDatasetS(config, n_tsses=40000, rand_offset=100)
     data_loader = DataLoader(train_set, batch_size=config.batch_size, shuffle=True, num_workers=config.num_workers)
+    print("Starting training...", flush=True)
     sampler = Euler_Maruyama_sampler
 
     optimizer = Adam(score_model.parameters(), lr=config.lr)
