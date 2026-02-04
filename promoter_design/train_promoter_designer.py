@@ -56,7 +56,7 @@ class ModelParameters:
 
     device = 'cuda'
     batch_size = 64
-    num_workers = 4
+    num_workers = 0
 
     n_time_steps = 400
 
