@@ -412,7 +412,9 @@ if __name__ == '__main__':
                 gx_to_gv(perturbed_x_grad, perturbed_x)) ** 2).view(x.shape[0], -1).mean(dim=1).detach()
 
     time_dependent_weights = time_dependent_cums / time_dependent_counts
-    time_dependent_weights = time_dependent_weights / time_dependent_weights.mean()
+    # NaN/Inf-safe normalization
+    time_dependent_weights = torch.nan_to_num(time_dependent_weights, nan=0.0, posinf=0.0, neginf=0.0)
+    time_dependent_weights = time_dependent_weights / time_dependent_weights.mean().clamp(min=1e-12)
     print("Time-dependent weights computed.", flush=True)
 
     plt.figure(figsize=(10, 6))
@@ -467,6 +469,7 @@ if __name__ == '__main__':
     torch.set_default_dtype(torch.float32)
     bestsei_validloss = float('Inf')
 
+    debug_nan_reported = False
     for epoch in range(config.num_epochs):
         avg_loss = 0.
         num_items = 0
@@ -484,9 +487,16 @@ if __name__ == '__main__':
             s = xS[:, :, 4:5]
 
             # Optional : there are several options for importance sampling here. it needs to match the loss function
-            random_t = torch.LongTensor(np.random.choice(np.arange(config.n_time_steps), size=x.shape[0],
-                                                         p=(torch.sqrt(time_dependent_weights) / torch.sqrt(
-                                                             time_dependent_weights).sum()).cpu().detach().numpy()))
+            sampling_probs = torch.sqrt(time_dependent_weights)
+            sampling_probs = torch.nan_to_num(sampling_probs, nan=0.0, posinf=0.0, neginf=0.0)
+            sampling_probs = sampling_probs / sampling_probs.sum().clamp(min=1e-12)
+            random_t = torch.LongTensor(
+                np.random.choice(
+                    np.arange(config.n_time_steps),
+                    size=x.shape[0],
+                    p=sampling_probs.cpu().detach().numpy(),
+                )
+            )
 
             if config.random_order:
                 order = np.random.permutation(np.arange(C))
@@ -544,6 +554,16 @@ if __name__ == '__main__':
             avg_loss += loss_raw.item() * x.shape[0]
             num_items += x.shape[0]
             batch_losses.append(loss_raw.item())
+
+            if not debug_nan_reported and (torch.isnan(loss_raw) or not torch.isfinite(loss_raw)):
+                debug_nan_reported = True
+                print("[DEBUG] NaN/Inf detected in loss", flush=True)
+                print(f"[DEBUG] time_dependent_weights (first 5): {time_dependent_weights[:5].detach().cpu().numpy()}", flush=True)
+                print(f"[DEBUG] time_dependent_weights (min/max): {time_dependent_weights.min().item()} / {time_dependent_weights.max().item()}", flush=True)
+                print(f"[DEBUG] sampling_probs (first 5): {sampling_probs[:5].detach().cpu().numpy()}", flush=True)
+                print(f"[DEBUG] sampling_probs (sum): {sampling_probs.sum().item()}", flush=True)
+                print(f"[DEBUG] perturbed_x stats: min {perturbed_x.min().item()} max {perturbed_x.max().item()}", flush=True)
+                print(f"[DEBUG] perturbed_x_grad stats: min {perturbed_x_grad.min().item()} max {perturbed_x_grad.max().item()}", flush=True)
 
         if (batch_idx + 1) % config.accumulation_steps != 0:
             optimizer.step()
