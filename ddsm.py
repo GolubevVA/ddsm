@@ -533,7 +533,7 @@ def Euler_Maruyama_sampler(
 
     if time_dilation_start_time is None:
         time_steps = torch.linspace(
-            max_time, min_time, num_steps * time_dilation + 1, device=device
+            max_time, min_time, round(num_steps * time_dilation) + 1, device=device
         )
     else:
         time_steps = torch.cat(
@@ -547,8 +547,8 @@ def Euler_Maruyama_sampler(
                 torch.linspace(
                     time_dilation_start_time,
                     min_time,
-                    round(num_steps * (time_dilation_start_time - min_time) / max_time)
-                    * time_dilation
+                    round(round(num_steps * (time_dilation_start_time - min_time) / max_time)
+                    * time_dilation)
                     + 1,
                 ),
             ]
