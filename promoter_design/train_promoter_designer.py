@@ -863,39 +863,84 @@ def main() -> None:
             print(f"[val] epoch {epoch} avg_loss={epoch_val_loss:.6f}", flush=True)
 
         # -----------------------------
-        # SEI validation metric via sampling (expensive; default every epoch on subset)
+        # SEI validation metric via sampling (expensive)
         # -----------------------------
         if (epoch % config.val_sei_every) == 0:
             print(f"[stage] epoch {epoch}: sampling sequences for SEI metric...", flush=True)
+
+            # ---- free VRAM: SEI is NOT needed during sampling ----
+            was_sei_on_cuda = next(sei.parameters()).is_cuda
+            sei = sei.cpu()
+            torch.cuda.empty_cache()
+
+            # ---- sampling needs grads wrt x/v, but NOT wrt model params ----
             score_model.eval()
+            prev_req = []
+            for p in score_model.parameters():
+                prev_req.append(p.requires_grad)
+                p.requires_grad_(False)
 
             k = int(config.val_sei_k_samples)
             mses = []
-            for k_i in range(k):
-                # sample in mini-batches to avoid OOM
-                all_gen = []
-                for i in tqdm_bar(range(int(np.ceil(valid_concat_input.shape[0] / config.val_sei_batch_size))),
-                              desc=f"sample k={k_i+1}/{k}", dynamic_ncols=True):
-                    sl = slice(i * config.val_sei_batch_size,
-                               min((i + 1) * config.val_sei_batch_size, valid_concat_input.shape[0]))
-                    gen = sample_sequences(
-                        score_model, sampler_fn,
-                        concat_input=valid_concat_input[sl],
-                        batch_size=int(sl.stop - sl.start),
-                        device=config.device,
-                        max_time=config.val_sei_max_time,
-                        min_time=config.val_sei_min_time,
-                        time_dilation=config.val_sei_time_dilation,
-                        num_steps=int(config.val_sei_num_steps),
-                        eps=1e-5,
-                        speed_balanced=config.speed_balanced,
+
+            try:
+                for k_i in range(k):
+                    all_gen = []
+
+                    for i in tqdm_bar(
+                        range(int(np.ceil(valid_concat_input.shape[0] / config.val_sei_batch_size))),
+                        desc=f"sample k={k_i+1}/{k}",
+                        dynamic_ncols=True
+                    ):
+                        sl = slice(
+                            i * config.val_sei_batch_size,
+                            min((i + 1) * config.val_sei_batch_size, valid_concat_input.shape[0])
+                        )
+
+                        gen = sample_sequences(
+                            score_model, sampler_fn,
+                            concat_input=valid_concat_input[sl],
+                            batch_size=int(sl.stop - sl.start),
+                            device=config.device,
+                            max_time=config.val_sei_max_time,
+                            min_time=config.val_sei_min_time,
+                            time_dilation=config.val_sei_time_dilation,
+                            num_steps=int(config.val_sei_num_steps),
+                            eps=1e-5,
+                            speed_balanced=config.speed_balanced,
+                        )
+                        all_gen.append(gen)
+
+                    all_gen = np.concatenate(all_gen, axis=0)
+                    bin_gen = (all_gen > 0.5).astype(np.float32)
+
+                    # ---- now SEI is needed: on GPU only here 
+                    sei = sei.to(config.device)
+                    torch.cuda.empty_cache()
+
+                    # IMPORTANT: lower this in case of OOM (32 -> 16 -> 8)
+                    sei_bs = 32
+
+                    gen_h3k4 = compute_sei_h3k4me3(
+                        sei, seifeatures, bin_gen, batch_size=sei_bs, device=config.device
                     )
-                    all_gen.append(gen)
-                all_gen = np.concatenate(all_gen, axis=0)
-                bin_gen = (all_gen > 0.5).astype(np.float32)
-                gen_h3k4 = compute_sei_h3k4me3(sei, seifeatures, bin_gen, batch_size=128, device=config.device)
-                mse = float(np.mean((valid_ref_h3k4 - gen_h3k4) ** 2))
-                mses.append(mse)
+                    mse = float(np.mean((valid_ref_h3k4 - gen_h3k4) ** 2))
+                    mses.append(mse)
+
+                    # move SEI back to CPU again to keep VRAM low between k samples
+                    sei = sei.cpu()
+                    torch.cuda.empty_cache()
+
+            finally:
+                # restore model params requires_grad
+                for p, r in zip(score_model.parameters(), prev_req):
+                    p.requires_grad_(r)
+                score_model.train()
+
+                # optionally restore SEI back to original placement
+                if was_sei_on_cuda:
+                    sei = sei.to(config.device)
+                torch.cuda.empty_cache()
 
             sei_mse_mean = float(np.mean(mses))
             sei_mse_std = float(np.std(mses))
