@@ -401,6 +401,7 @@ def ddsm_loss(
     time_dependent_weights: torch.Tensor,  # [T] on CPU ok; we index and move
     v_one, v_zero, v_one_loggrad, v_zero_loggrad,
     alpha, beta,
+    create_graph: bool = True
 ) -> torch.Tensor:
     """
     Computes the per-batch training loss used in the original script.
@@ -440,7 +441,7 @@ def ddsm_loss(
         perturbed_v = sb._inverse(perturbed_x[..., order], prevent_nan=True).detach()
         loss = torch.mean(torch.mean(
             w_t * s_w[(None,) * (x.ndim - 1)] * perturbed_v * (1 - perturbed_v) *
-            (gx_to_gv(score[..., order], perturbed_x[..., order], create_graph=True)
+            (gx_to_gv(score[..., order], perturbed_x[..., order], create_graph=create_graph)
              - gx_to_gv(perturbed_x_grad[..., order], perturbed_x[..., order])) ** 2,
             dim=(1)
         ))
@@ -448,7 +449,7 @@ def ddsm_loss(
         perturbed_v = sb._inverse(perturbed_x, prevent_nan=True).detach()
         loss = torch.mean(torch.mean(
             w_t * s_w[(None,) * (x.ndim - 1)] * perturbed_v * (1 - perturbed_v) *
-            (gx_to_gv(score, perturbed_x, create_graph=True)
+            (gx_to_gv(score, perturbed_x, create_graph=create_graph)
              - gx_to_gv(perturbed_x_grad, perturbed_x)) ** 2,
             dim=(1)
         ))
@@ -834,11 +835,11 @@ def main() -> None:
                 p = (tdw_sqrt / tdw_sqrt.sum()).cpu().numpy()
                 random_t = torch.LongTensor(np.random.choice(np.arange(config.n_time_steps), size=x.shape[0], p=p))
 
-                with torch.no_grad():
-                    vloss = ddsm_loss(
-                        config, sb, score_model, x, s_sig, random_t, timepoints,
-                        time_dependent_weights, v_one, v_zero, v_one_loggrad, v_zero_loggrad, alpha, beta
-                    )
+                vloss = ddsm_loss(
+                    config, sb, score_model, x, s_sig, random_t, timepoints,
+                    time_dependent_weights, v_one, v_zero, v_one_loggrad, v_zero_loggrad, alpha, beta,
+                    create_graph=False,
+                )
 
                 bs = int(x.shape[0])
                 v_running += float(vloss.item()) * bs
