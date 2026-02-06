@@ -14,7 +14,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
-from tqdm import tqdm
+from tqdm.auto import tqdm as tqdm_bar
 
 try:
     import psutil  # type: ignore
@@ -262,7 +262,7 @@ def compute_sei_h3k4me3(
     idx_h3k4 = (seifeatures_df[1].str.strip().values == "H3K4me3")
     out = np.zeros((seqs_oh.shape[0], 21907), dtype=np.float32)
 
-    for i in tqdm(range(int(np.ceil(seqs_oh.shape[0] / batch_size))), desc="SEI forward", dynamic_ncols=True):
+    for i in tqdm_bar(range(int(np.ceil(seqs_oh.shape[0] / batch_size))), desc="SEI forward", dynamic_ncols=True):
         sl = slice(i * batch_size, min((i + 1) * batch_size, seqs_oh.shape[0]))
         seq = seqs_oh[sl]
         x = torch.cat([
@@ -421,7 +421,7 @@ def main() -> None:
 
     batches = []
     with torch.no_grad():
-        for xb in tqdm(loader, desc="cache eval subset", dynamic_ncols=True):
+        for xb in tqdm_bar(loader, desc="cache eval subset", dynamic_ncols=True):
             batches.append(xb)
             if sum(b.shape[0] for b in batches) >= int(args.n_examples):
                 break
@@ -437,7 +437,7 @@ def main() -> None:
     mses = []
     for k_i in range(int(args.k_samples)):
         all_gen = []
-        for i in tqdm(range(int(np.ceil(concat_input.shape[0] / cfg.batch_size))),
+        for i in tqdm_bar(range(int(np.ceil(concat_input.shape[0] / cfg.batch_size))),
                       desc=f"sample k={k_i+1}/{args.k_samples}", dynamic_ncols=True):
             sl = slice(i * cfg.batch_size, min((i + 1) * cfg.batch_size, concat_input.shape[0]))
             gen = sample_sequences(

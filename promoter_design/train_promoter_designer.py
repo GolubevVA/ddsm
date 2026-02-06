@@ -16,7 +16,7 @@ import torch
 from torch import nn
 from torch.optim import Adam
 from torch.utils.data import DataLoader, Dataset
-from tqdm import tqdm
+from tqdm.auto import tqdm as tqdm_bar
 
 # Optional system stats (falls back gracefully if unavailable)
 try:
@@ -339,7 +339,7 @@ def compute_time_dependent_weights(
     time_dependent_cums = torch.zeros(config.n_time_steps).to(config.device)
     time_dependent_counts = torch.zeros(config.n_time_steps).to(config.device)
 
-    for x in tqdm(loader, desc="time-dependent weights", dynamic_ncols=True):
+    for x in tqdm_bar(loader, desc="time-dependent weights", dynamic_ncols=True):
         x = x[..., :4]
         random_t = torch.randint(0, config.n_time_steps, (x.shape[0],))
 
@@ -475,7 +475,7 @@ def compute_sei_h3k4me3(
     idx_h3k4 = (seifeatures_df[1].str.strip().values == "H3K4me3")
     out = np.zeros((seqs_oh.shape[0], 21907), dtype=np.float32)
 
-    for i in tqdm(range(int(np.ceil(seqs_oh.shape[0] / batch_size))), desc="SEI forward", dynamic_ncols=True):
+    for i in tqdm_bar(range(int(np.ceil(seqs_oh.shape[0] / batch_size))), desc="SEI forward", dynamic_ncols=True):
         sl = slice(i * batch_size, min((i + 1) * batch_size, seqs_oh.shape[0]))
         seq = seqs_oh[sl]
         # pad to 4096 with 0.25 context as in original scripts
@@ -729,7 +729,7 @@ def main() -> None:
     valid_batches = []
     val_subset = int(args.val_sei_subset)
     with torch.no_grad():
-        for xb in tqdm(valid_loader, desc="cache valid subset", dynamic_ncols=True):
+        for xb in tqdm_bar(valid_loader, desc="cache valid subset", dynamic_ncols=True):
             valid_batches.append(xb)
             if sum(b.shape[0] for b in valid_batches) >= val_subset:
                 break
@@ -774,7 +774,7 @@ def main() -> None:
         n_items = 0
         t0 = time.time()
 
-        pbar = tqdm(train_loader, dynamic_ncols=True)
+        pbar = tqdm_bar(train_loader, dynamic_ncols=True)
         for xS in pbar:
             x = xS[:, :, :4].float()
             s_sig = xS[:, :, 4:5].float()
@@ -825,7 +825,7 @@ def main() -> None:
             score_model.eval()
             v_running = 0.0
             v_items = 0
-            vpbar = tqdm(valid_loader, dynamic_ncols=True)
+            vpbar = tqdm_bar(valid_loader, dynamic_ncols=True)
             for xS in vpbar:
                 x = xS[:, :, :4].float()
                 s_sig = xS[:, :, 4:5].float()
@@ -873,7 +873,7 @@ def main() -> None:
             for k_i in range(k):
                 # sample in mini-batches to avoid OOM
                 all_gen = []
-                for i in tqdm(range(int(np.ceil(valid_concat_input.shape[0] / config.val_sei_batch_size))),
+                for i in tqdm_bar(range(int(np.ceil(valid_concat_input.shape[0] / config.val_sei_batch_size))),
                               desc=f"sample k={k_i+1}/{k}", dynamic_ncols=True):
                     sl = slice(i * config.val_sei_batch_size,
                                min((i + 1) * config.val_sei_batch_size, valid_concat_input.shape[0]))
